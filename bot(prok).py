@@ -413,7 +413,8 @@ def get_creative_text(ctype, variant, peer_id):
 def set_creative_text(ctype, variant, text, peer_id):
     conn = get_db_connection(peer_id)
     try:
-        conn.execute("REPLACE INTO creative (type, variant, task_text) VALUES (?, ?, ?)", (ctype, variant, text))
+        conn.execute("DELETE FROM creative WHERE type=? AND variant=?", (ctype, variant))
+        conn.execute("INSERT INTO creative (type, variant, task_text) VALUES (?, ?, ?)", (ctype, variant, text))
         conn.commit()
     finally:
         conn.close()
@@ -459,6 +460,20 @@ def delete_topic(topic_id, peer_id):
         conn.commit()
     finally:
         conn.close()
+
+def get_creative_text_fallback(ctype, variant, peer_id):
+    row = get_creative_text(ctype, variant, peer_id)
+    if row is not None:
+        return row
+    if ctype == "Обращения":
+        src_variant_map = {1: 1, 3: 2}
+        src_variant = src_variant_map.get(variant)
+        if src_variant is not None:
+            src_row = get_creative_text("Прокуратура", src_variant, peer_id)
+            if src_row is not None:
+                set_creative_text(ctype, variant, src_row['task_text'], peer_id)
+                return get_creative_text(ctype, variant, peer_id)
+    return None
 
 def delete_all_topics(peer_id):
     conn = get_db_connection(peer_id)
@@ -868,11 +883,9 @@ def delete_audience_by_owner(peer_id):
 # -------------------- СОЗДАНИЕ И УДАЛЕНИЕ АУДИТОРИЙ --------------------
 
 def init_global_materials():
-    """Инициализация глобальных данных: темы для докладов и демо-вопросы для экзаменов."""
     conn = get_db_connection(None)
     try:
         cur = conn.cursor()
-        # --- 1. Темы для докладов (если пусто) ---
         cur.execute("SELECT COUNT(*) FROM topics")
         if cur.fetchone()[0] == 0:
             default_topics = [
@@ -907,12 +920,9 @@ def init_global_materials():
             conn.commit()
             logger.info("Добавлены темы для докладов.")
 
-        # --- 2. Демо-вопросы для экзаменов (если нет ни одного вопроса) ---
         cur.execute("SELECT COUNT(*) FROM test_questions")
         if cur.fetchone()[0] == 0:
-            # Для каждой экзаменационной темы создаём по 3 вопроса (варианты 1,2,3)
             exam_topics = ["Экзамен_1", "Экзамен_2", "Экзамен_3"]
-            # Определим общие вопросы (можно разные для каждой темы, но для демо оставим одинаковые)
             demo_questions = [
                 {
                     "question": "Что такое презумпция невиновности?",
@@ -940,17 +950,15 @@ def init_global_materials():
                 }
             ]
             for topic in exam_topics:
-                for variant in [1, 2, 3]:  # для каждого варианта создаём вопросы
+                for variant in [1, 2, 3]:
                     for idx, q in enumerate(demo_questions, start=1):
-                        # Определяем правильный индекс
                         correct_index = None
                         for i, (label, text) in enumerate(q["options"]):
                             if label == q["correct"]:
                                 correct_index = i
                                 break
                         if correct_index is None:
-                            correct_index = 0  # fallback
-                        # Вставляем вопрос
+                            correct_index = 0
                         cur.execute(
                             "INSERT INTO test_questions (topic, variant, question_text, correct_option_index, order_num) VALUES (?, ?, ?, ?, ?)",
                             (topic, variant, q["question"], correct_index, idx)
@@ -963,7 +971,6 @@ def init_global_materials():
                             )
             conn.commit()
             logger.info("Добавлены демо-вопросы для экзаменационных тем (3 темы × 3 варианта × 3 вопроса).")
-
     except Exception as e:
         logger.error(f"Ошибка в init_global_materials: {e}")
     finally:
@@ -979,7 +986,7 @@ def create_datacenter(peer_id, owner_id, request_msg_id=None):
         finally:
             conn.close()
         logger.info(f"Старый датацентр {old_dc} стал аудиторией")
-    init_global_materials()  # теперь здесь создаются и вопросы
+    init_global_materials()
     set_datacenter_peer_id(peer_id)
     conn = get_db_connection(None)
     try:
@@ -1383,6 +1390,15 @@ def get_stage2_theory_keyboard():
     keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
+def get_obrasheniya_keyboard():
+    keyboard = VkKeyboard(one_time=False, inline=False)
+    keyboard.add_button("Уведомление о принятии", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button("Ответ на обращение", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_button("Извещение по делу", color=VkKeyboardColor.PRIMARY)
+    keyboard.add_line()
+    keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
+    return keyboard.get_keyboard()
+
 def get_stage2_variants_keyboard(topic):
     keyboard = VkKeyboard(one_time=False, inline=False)
     display_topic = topic.replace('_', ' ')
@@ -1406,11 +1422,19 @@ def get_practice_types_keyboard():
 def get_practice_variants_keyboard(practice_type):
     keyboard = VkKeyboard(one_time=False, inline=False)
     if practice_type == "Суды":
-        variants = {1: "Исковое заявление", 2: "Вариант 2", 3: "Вариант 3"}
+        variants = {1: "Исковое заявление", 2: "Ходатайство прокурора", 3: "Прокурорское представление"}
     elif practice_type == "Прокуратура":
-        variants = {1: "Обращение (принятие)", 2: "Обращение (извещение)", 3: "ПОСТАНОВЛЕНИЯ", 4: "ОТВЕТА (по существу)", 5: "ОТВЕТА (заявление)", 6: "cash fail"}
-    else:  # Доклады
+        variants = {
+            1: "Обращения",
+            2: "ПОСТАНОВЛЕНИЯ",
+            3: "Запрос материалов",
+            4: "Решение по делу ФБР",
+            5: "Возбуждение УД"
+        }
+    elif practice_type == "Доклады":
         variants = {1: "Доклад"}
+    else:
+        variants = {}
     for v, label in variants.items():
         keyboard.add_button(label, color=VkKeyboardColor.PRIMARY)
         if v % 2 == 0 and v < len(variants):
@@ -1427,9 +1451,7 @@ def get_exam_menu_keyboard():
     keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
-# -------- ДИНАМИЧЕСКАЯ КЛАВИАТУРА ДЛЯ ВЫБОРА ТЕМ ЭКЗАМЕНА ----------
 def get_exam_topics_keyboard(peer_id):
-    """Формирует клавиатуру с темами экзамена, взятыми из БД (только те, что начинаются с 'Экзамен_')."""
     keyboard = VkKeyboard(one_time=False, inline=False)
     conn = get_db_connection(peer_id)
     try:
@@ -1439,9 +1461,7 @@ def get_exam_topics_keyboard(peer_id):
         topics = [row['topic'] for row in rows]
     finally:
         conn.close()
-
     if not topics:
-        # Если нет ни одной темы, показываем кнопку "Нет тем" (но она неактивна)
         keyboard.add_button("⚠️ Нет экзаменационных тем", color=VkKeyboardColor.SECONDARY)
     else:
         for topic in topics:
@@ -1714,8 +1734,9 @@ def is_panel_command(text):
         "🔊 Включить",
         "👋 Приветствие"
     ]
-    panel_texts.extend(["Исковое заявление", "Вариант 2", "Вариант 3"])
-    panel_texts.extend(["Обращение (принятие)", "Обращение (извещение)", "ПОСТАНОВЛЕНИЯ", "ОТВЕТА (по существу)", "ОТВЕТА (заявление)", "cash fail"])
+    panel_texts.extend(["Исковое заявление", "Ходатайство прокурора", "Прокурорское представление"])
+    panel_texts.extend(["Обращение (принятие)", "Обращение (извещение)", "ПОСТАНОВЛЕНИЯ", "Запрос материалов", "Решение по делу ФБР", "Возбуждение УД"])
+    panel_texts.extend(["Уведомление о принятии", "Ответ на обращение", "Извещение по делу", "Обращения"])
     panel_texts.append("Доклад")
     return clean in panel_texts
 
@@ -1806,7 +1827,6 @@ def handle_main_menu(text, peer_id, sender_id, conversation_message_id, can_mana
         elif state.startswith('exam_variants_'):
             state_data['state'] = 'exam_topics'
             safe_menu_state_set(key, state_data)
-            # Используем динамическую клавиатуру
             send_menu(peer_id, sender_id, "Выберите тему экзамена:", get_exam_topics_keyboard(peer_id))
         elif state == 'exam_topics':
             state_data['state'] = 'exam_menu'
@@ -2034,54 +2054,109 @@ def handle_main_menu(text, peer_id, sender_id, conversation_message_id, can_mana
             return True
         elif clean_text == "Доклады":
             delete_original()
-            state_data['state'] = 'practice_variants_Доклады'
+            topics = get_all_topics(peer_id)
+            if not topics:
+                send_message(peer_id, "📭 Нет тем для докладов. Добавьте их в управлении материалами.")
+                return True
+            import random
+            topic = random.choice(topics)
+            template = get_report_template(peer_id)
+            if not template or template.strip() == '':
+                template = "(форма доклада не задана)"
+            logger.info(f"Доклад: тема='{topic['text']}', шаблон='{template}'")
+            output = f"📎 Тема: {topic['text']}\n\n{template}"
+            keyboard = VkKeyboard(one_time=False, inline=False)
+            keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
+            keyboard.add_button("🎲 Ещё доклад", color=VkKeyboardColor.PRIMARY)
+            state_data['state'] = 'practice_topics'
             safe_menu_state_set(key, state_data)
-            send_menu(peer_id, sender_id, "Выберите вариант для Докладов:", get_practice_variants_keyboard("Доклады"))
+            send_menu(peer_id, sender_id, output, keyboard.get_keyboard())
             return True
 
+    # ===== ОБРАБОТКА ВАРИАНТОВ ДЛЯ СУДОВ И ПРОКУРАТУРЫ (КРОМЕ ОБРАЩЕНИЙ) =====
     if state.startswith('practice_variants_'):
         practice_type = state.replace('practice_variants_', '')
         if practice_type == "Суды":
-            variants = {1: "Исковое заявление", 2: "Вариант 2", 3: "Вариант 3"}
+            variants = {1: "Исковое заявление", 2: "Ходатайство прокурора", 3: "Прокурорское представление"}
         elif practice_type == "Прокуратура":
-            variants = {1: "Обращение (принятие)", 2: "Обращение (извещение)", 3: "ПОСТАНОВЛЕНИЯ", 4: "ОТВЕТА (по существу)", 5: "ОТВЕТА (заявление)", 6: "cash fail"}
-        else:  # Доклады
-            variants = {1: "Доклад"}
+            variants = {
+                1: "Обращения",
+                2: "ПОСТАНОВЛЕНИЯ",
+                3: "Запрос материалов",
+                4: "Решение по делу ФБР",
+                5: "Возбуждение УД"
+            }
+        else:
+            variants = {}
 
+        # Если выбран вариант "Обращения" в прокуратуре – переходим в подменю
+        if practice_type == "Прокуратура" and clean_text == "Обращения":
+            delete_original()
+            state_data['state'] = 'practice_obrasheniya'
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Выберите тип обращения:", get_obrasheniya_keyboard())
+            return True
+
+        # Остальные варианты – показываем текст из базы
         for v, label in variants.items():
             if clean_text == label:
                 delete_original()
-                if practice_type == "Доклады":
-                    conn = get_db_connection(peer_id)
-                    try:
-                        cur = conn.cursor()
-                        cur.execute("SELECT id, text, template FROM topics ORDER BY RANDOM() LIMIT 1")
-                        topic_row = cur.fetchone()
-                    finally:
-                        conn.close()
-                    report_template = get_report_template(peer_id)
-                    if topic_row:
-                        topic_text = topic_row['text']
-                        topic_template = topic_row['template'] or ""
-                        msg_text = ""
-                        if report_template:
-                            msg_text += f"📎 Форма доклада:\n{report_template}\n\n"
-                        msg_text += f"Тема: {topic_text}"
-                        if topic_template:
-                            msg_text += f"\n\nШаблон темы:\n{topic_template}"
-                    else:
-                        msg_text = "📎 Творческое задание: Доклад\n\n⚠️ Темы для докладов не добавлены."
-                    row = get_creative_text("Доклады", 1, peer_id)
-                    if row and row['task_text']:
-                        msg_text += f"\n\n{row['task_text']}"
-                    send_long_message(peer_id, msg_text)
+                row = get_creative_text(practice_type, v, peer_id)
+                if row and row['task_text']:
+                    send_long_message(peer_id, f"📎 {label}\n\n{row['task_text']}")
                 else:
-                    row = get_creative_text(practice_type, v, peer_id)
-                    if row and row['task_text']:
-                        send_long_message(peer_id, f"📎 Практическое задание: {label}\n\n{row['task_text']}")
-                    else:
-                        send_message(peer_id, f"📂 Практическое задание «{label}» не найдено или пусто.")
+                    send_message(peer_id, f"📂 Документ «{label}» не найден или пуст.")
                 return True
+
+    # ===== РАНДОМНЫЙ ДОКЛАД (НОВОЕ СОСТОЯНИЕ) =====
+    if state == 'practice_topics':
+        if clean_text == "🔙 Назад":
+            delete_original()
+            state_data['state'] = 'practice_types'
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Выберите тип практики:", get_practice_types_keyboard())
+            return True
+        elif clean_text == "🎲 Ещё доклад":
+            delete_original()
+            topics = get_all_topics(peer_id)
+            if not topics:
+                send_message(peer_id, "📭 Тем больше нет.")
+                state_data['state'] = 'practice_types'
+                safe_menu_state_set(key, state_data)
+                send_menu(peer_id, sender_id, "Выберите тип практики:", get_practice_types_keyboard())
+                return True
+            import random
+            topic = random.choice(topics)
+            template = get_report_template(peer_id)
+            if not template or template.strip() == '':
+                template = "(форма доклада не задана)"
+            logger.info(f"Ещё доклад: тема='{topic['text']}', шаблон='{template}'")
+            output = f"📎 Тема: {topic['text']}\n\n{template}"
+            keyboard = VkKeyboard(one_time=False, inline=False)
+            keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
+            keyboard.add_button("🎲 Ещё доклад", color=VkKeyboardColor.PRIMARY)
+            send_menu(peer_id, sender_id, output, keyboard.get_keyboard())
+            return True
+
+    # ===== ОБРАБОТКА ОБРАЩЕНИЙ (ПОДМЕНЮ) =====
+    if state == 'practice_obrasheniya':
+        if clean_text in ["Уведомление о принятии", "Ответ на обращение", "Извещение по делу"]:
+            delete_original()
+            variant_map = {"Уведомление о принятии": 1, "Ответ на обращение": 2, "Извещение по делу": 3}
+            v = variant_map.get(clean_text)
+            if v:
+                row = get_creative_text_fallback("Обращения", v, peer_id)
+                if row and row['task_text']:
+                    send_long_message(peer_id, f"📎 {clean_text}\n\n{row['task_text']}")
+                else:
+                    send_message(peer_id, f"📂 Шаблон «{clean_text}» не найден или пуст.")
+            return True
+        elif clean_text == "🔙 Назад":
+            delete_original()
+            state_data['state'] = 'practice_variants_Прокуратура'
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Выберите тип документа в прокуратуре:", get_practice_variants_keyboard("Прокуратура"))
+            return True
 
     # ===== ОБРАБОТКА ЭТАПА 4 (ЭКЗАМЕНАЦИОННЫЙ) =====
     if state == 'exam_menu':
@@ -2098,7 +2173,6 @@ def handle_main_menu(text, peer_id, sender_id, conversation_message_id, can_mana
             return True
 
     if state == 'exam_topics':
-        # Получаем список тем из БД
         conn = get_db_connection(peer_id)
         try:
             cur = conn.cursor()
@@ -2114,7 +2188,6 @@ def handle_main_menu(text, peer_id, sender_id, conversation_message_id, can_mana
             send_menu(peer_id, sender_id, f"Выберите вариант для {clean_text}:", get_exam_variants_keyboard(topic))
             return True
         else:
-            # Если тема не найдена, возможно, нажата кнопка "Нет тем" – игнорируем
             pass
 
     if state.startswith('exam_variants_'):
@@ -2600,7 +2673,7 @@ def handle_command(text, peer_id, sender_id):
         except:
             pass
         sys.exit(0)
-        
+
     if cmd == "/help":
         help_text = (
             "⚙️ УПРАВЛЕНИЕ БОТОМ\n\n"
@@ -3067,7 +3140,6 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
         elif current_state == 'manage_st4_exam_variants':
             state_data['state'] = 'manage_st4_exam_tests'
             safe_menu_state_set(key, state_data)
-            # Используем динамическую клавиатуру
             send_menu(peer_id, sender_id, "📝 Управление экзаменационными тестами. Выберите тему:", get_exam_topics_keyboard(peer_id))
         elif current_state == 'manage_st4_exam_action':
             state_data['state'] = 'manage_st4_exam_variants'
@@ -3234,26 +3306,63 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
     if current_state == 'manage_st3_variants':
         practice_type = state_data.get('selected_practice_type')
         if practice_type == "Суды":
-            variants = {1: "Исковое заявление", 2: "Вариант 2", 3: "Вариант 3"}
+            variants = {1: "Исковое заявление", 2: "Ходатайство прокурора", 3: "Прокурорское представление"}
         elif practice_type == "Прокуратура":
-            variants = {1: "Обращение (принятие)", 2: "Обращение (извещение)", 3: "ПОСТАНОВЛЕНИЯ", 4: "ОТВЕТА (по существу)", 5: "ОТВЕТА (заявление)", 6: "cash fail"}
+            variants = {
+                1: "Обращения",
+                2: "ПОСТАНОВЛЕНИЯ",
+                3: "Запрос материалов",
+                4: "Решение по делу ФБР",
+                5: "Возбуждение УД"
+            }
+        elif practice_type == "Обращения":
+            variants = {1: "Уведомление о принятии", 2: "Ответ на обращение", 3: "Извещение по делу"}
         else:
             variants = {}
+
         for v, label in variants.items():
             if clean_text == label:
-                state_data['selected_variant'] = v
-                state_data['state'] = 'manage_st3_action'
-                safe_menu_state_set(key, state_data)
-                row = get_creative_text(practice_type, v, peer_id)
-                current_text = row['task_text'] if row else "Текст не задан."
-                send_menu(peer_id, sender_id, f"📎 ПРАКТИЧЕСКОЕ ЗАДАНИЕ: {label}\n\n{current_text}", get_manage_action_keyboard())
-                return True
+                if practice_type == "Прокуратура" and label == "Обращения":
+                    state_data['state'] = 'manage_obrasheniya'
+                    safe_menu_state_set(key, state_data)
+                    send_menu(peer_id, sender_id, "Выберите шаблон обращения для редактирования:", get_obrasheniya_keyboard())
+                    return True
+                else:
+                    state_data['selected_variant'] = v
+                    state_data['state'] = 'manage_st3_action'
+                    safe_menu_state_set(key, state_data)
+                    row = get_creative_text(practice_type, v, peer_id)
+                    current_text = row['task_text'] if row else "Текст не задан."
+                    send_menu(peer_id, sender_id, f"📎 {label}\n\n{current_text}", get_manage_action_keyboard())
+                    return True
+
+    if current_state == 'manage_obrasheniya':
+        if clean_text in ["Уведомление о принятии", "Ответ на обращение", "Извещение по делу"]:
+            variant_map = {"Уведомление о принятии": 1, "Ответ на обращение": 2, "Извещение по делу": 3}
+            v = variant_map.get(clean_text)
+            state_data['state'] = 'manage_st3_action'
+            state_data['selected_practice_type'] = "Обращения"
+            state_data['selected_variant'] = v
+            safe_menu_state_set(key, state_data)
+            row = get_creative_text_fallback("Обращения", v, peer_id)
+            current_text = row['task_text'] if row else "Текст не задан."
+            send_menu(peer_id, sender_id, f"📎 {clean_text}\n\n{current_text}", get_manage_action_keyboard())
+            return True
+        elif clean_text == "🔙 Назад":
+            state_data['state'] = 'manage_st3_variants'
+            state_data['selected_practice_type'] = "Прокуратура"
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Выберите тип документа в прокуратуре:", get_practice_variants_keyboard("Прокуратура"))
+            return True
 
     if current_state == 'manage_st3_action':
         if clean_text == "🔍 Посмотреть":
             practice_type = state_data.get('selected_practice_type')
             variant = state_data.get('selected_variant')
-            row = get_creative_text(practice_type, variant, peer_id)
+            if practice_type == "Обращения":
+                row = get_creative_text_fallback(practice_type, variant, peer_id)
+            else:
+                row = get_creative_text(practice_type, variant, peer_id)
             current_text = row['task_text'] if row else "Текст не задан."
             send_long_message(peer_id, f"📎 ТЕКСТ ЗАДАНИЯ:\n\n{current_text}")
             return True
@@ -3417,9 +3526,28 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
         delete_message_later(peer_id, conversation_message_id)
         return True
 
+    # --- Сохранение текста для практических заданий (Суды, Прокуратура, Обращения) ---
+    if current_state == 'wait_creative_text' and clean_text == "💾 Сохранить":
+        final_text = state_data.get('buffer', '').strip()
+        ctype = state_data.get('ctype')
+        variant = state_data.get('variant')
+        if ctype is not None and variant is not None:
+            set_creative_text(ctype, variant, final_text, peer_id)
+            state_data['state'] = 'manage_st3_action'
+            safe_menu_state_set(key, state_data)
+            send_menu(
+                peer_id,
+                sender_id,
+                f"✅ Задание сохранено!\n\n{final_text if final_text else '(пусто)'}",
+                get_manage_action_keyboard()
+            )
+            delete_message_later(peer_id, conversation_message_id)
+        else:
+            send_message(peer_id, "❌ Ошибка: не удалось определить тип задания.")
+        return True
+
     # Управление экзаменационными тестами
     if current_state == 'manage_st4_exam_tests':
-        # Получаем список тем из БД
         conn = get_db_connection(peer_id)
         try:
             cur = conn.cursor()
@@ -3436,7 +3564,6 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
             send_menu(peer_id, sender_id, f"Выберите вариант для {clean_text}:", get_exam_variants_keyboard(topic))
             return True
         else:
-            # Если тема не найдена – игнорируем (кнопка "Нет тем")
             pass
 
     if current_state == 'manage_st4_exam_variants':
@@ -4024,7 +4151,7 @@ def handle_callback(event):
         if cmid_to_delete:
             delete_message(peer_id, cmid_to_delete, force=True)
         return
-        
+
     elif cmd == "skip_notification":
         if not can_manage_materials(event.object.user_id, peer_id):
             send_message(peer_id, "❌ У вас нет прав на пропуск уведомления.")
