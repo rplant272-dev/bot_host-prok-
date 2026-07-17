@@ -1453,29 +1453,17 @@ def get_exam_menu_keyboard():
 
 def get_exam_topics_keyboard(peer_id):
     keyboard = VkKeyboard(one_time=False, inline=False)
-    conn = get_db_connection(peer_id)
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT DISTINCT topic FROM test_questions WHERE topic LIKE 'Экзамен_%' ORDER BY topic")
-        rows = cur.fetchall()
-        topics = [row['topic'] for row in rows]
-    finally:
-        conn.close()
-    if not topics:
-        keyboard.add_button("⚠️ Нет экзаменационных тем", color=VkKeyboardColor.SECONDARY)
-    else:
-        for topic in topics:
-            display = topic.replace('_', ' ')
-            keyboard.add_button(display, color=VkKeyboardColor.SECONDARY)
+    topics = ["Экзамен 1", "Экзамен 2", "Экзамен 3"]
+    for display in topics:
+        keyboard.add_button(display, color=VkKeyboardColor.SECONDARY)
     keyboard.add_line()
     keyboard.add_button("🔙 Назад", color=VkKeyboardColor.NEGATIVE)
     return keyboard.get_keyboard()
 
 def get_exam_variants_keyboard(topic):
     keyboard = VkKeyboard(one_time=False, inline=False)
-    display_topic = topic.replace('_', ' ')
     for v in [1, 2, 3]:
-        keyboard.add_button(f"{display_topic} вариант {v}", color=VkKeyboardColor.PRIMARY)
+        keyboard.add_button(str(v), color=VkKeyboardColor.PRIMARY)
         if v % 2 == 0:
             keyboard.add_line()
     keyboard.add_line()
@@ -2173,34 +2161,29 @@ def handle_main_menu(text, peer_id, sender_id, conversation_message_id, can_mana
             return True
 
     if state == 'exam_topics':
-        conn = get_db_connection(peer_id)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT topic FROM test_questions WHERE topic LIKE 'Экзамен_%' ORDER BY topic")
-            rows = cur.fetchall()
-            exam_topics = {row['topic'].replace('_', ' '): row['topic'] for row in rows}
-        finally:
-            conn.close()
+        exam_topics = {
+            "Экзамен 1": "Экзамен_1",
+            "Экзамен 2": "Экзамен_2",
+            "Экзамен 3": "Экзамен_3"
+        }
         if clean_text in exam_topics:
             topic = exam_topics[clean_text]
             state_data['state'] = f'exam_variants_{topic}'
             safe_menu_state_set(key, state_data)
             send_menu(peer_id, sender_id, f"Выберите вариант для {clean_text}:", get_exam_variants_keyboard(topic))
             return True
-        else:
-            pass
 
     if state.startswith('exam_variants_'):
         topic = state.replace('exam_variants_', '')
-        display_topic = topic.replace('_', ' ')
-        for v in [1, 2, 3]:
-            if clean_text == f"{display_topic} вариант {v}":
+        if clean_text.isdigit():
+            v = int(clean_text)
+            if 1 <= v <= 3:
                 delete_original()
                 has_one = has_one_by_one_test(topic, v, peer_id)
                 if has_one:
                     start_one_by_one_test(peer_id, topic, v, sender_id)
                 else:
-                    send_message(peer_id, f"❓ Для {display_topic} вариант {v} нет вопросов. Добавьте их в управлении материалами.")
+                    send_message(peer_id, f"❓ Для темы {topic.replace('_', ' ')} вариант {v} нет вопросов. Добавьте их в управлении материалами.")
                 return True
 
     return False
@@ -3064,7 +3047,12 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
     if current_state in ['wait_st1_text', 'wait_exam_info_text', 'wait_creative_text', 'wait_new_topic', 'wait_template_text', 'wait_report_template',
                          'wait_edit_question_text', 'wait_edit_option_text', 'wait_add_question_text', 'wait_enter_options_text', 'wait_enter_correct',
                          'manage_set_time', 'manage_set_threshold', 'manage_edit_options_change',
-                         'manage_add_question', 'manage_enter_options_type', 'manage_edit_options_text']:
+                         'manage_add_question', 'manage_enter_options_type', 'manage_edit_options_text',
+                         'manage_st4_exam_add_question',
+                         'manage_st4_exam_enter_options_type',
+                         'manage_st4_exam_enter_correct',
+                         'manage_st4_exam_edit_options_text',
+                         'manage_st4_exam_edit_options_change']:
         if clean_text not in ["💾 Сохранить", "➡️ Далее", "🔙 Назад", "✅ Готово", "➕ Ещё вариант"]:
             if 'buffer' not in state_data:
                 state_data['buffer'] = ""
@@ -3526,6 +3514,54 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
         delete_message_later(peer_id, conversation_message_id)
         return True
 
+    # ===== РЕДАКТИРОВАНИЕ ТЕКСТА ВОПРОСА (общее для теории и экзамена) =====
+    if current_state == 'wait_edit_question_text' and clean_text == "💾 Сохранить":
+        new_text = state_data.get('buffer', '').strip()
+        if not new_text:
+            send_message(peer_id, "❌ Вопрос не может быть пустым.")
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            return True
+        
+        qid = state_data.get('edit_question_id')
+        if qid is None:
+            send_message(peer_id, "❌ Ошибка: не найден ID вопроса.")
+            return True
+        
+        # Обновляем текст вопроса в БД
+        conn = get_db_connection(peer_id)
+        try:
+            conn.execute("UPDATE test_questions SET question_text=? WHERE id=?", (new_text, qid))
+            conn.commit()
+        finally:
+            conn.close()
+        
+        send_message(peer_id, "✅ Текст вопроса обновлён!")
+        
+        # Определяем, из экзамена или теории
+        if state_data.get('from_exam'):
+            state_data['state'] = 'manage_st4_exam_edit_question'
+            state_data.pop('from_exam', None)
+        else:
+            state_data['state'] = 'manage_edit_question'
+        
+        state_data['buffer'] = ""
+        safe_menu_state_set(key, state_data)
+        
+        # Показываем меню редактирования вопроса с обновлённым текстом
+        conn = get_db_connection(peer_id)
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT question_text FROM test_questions WHERE id=?", (qid,))
+            row = cur.fetchone()
+            question_text = row['question_text'] if row else "Вопрос не найден."
+        finally:
+            conn.close()
+        
+        send_menu(peer_id, sender_id, f"Редактируем вопрос:\n\n{question_text}\n\nЧто сделать?", get_edit_question_keyboard())
+        delete_message_later(peer_id, conversation_message_id)
+        return True
+
     # --- Сохранение текста для практических заданий (Суды, Прокуратура, Обращения) ---
     if current_state == 'wait_creative_text' and clean_text == "💾 Сохранить":
         final_text = state_data.get('buffer', '').strip()
@@ -3548,14 +3584,11 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
 
     # Управление экзаменационными тестами
     if current_state == 'manage_st4_exam_tests':
-        conn = get_db_connection(peer_id)
-        try:
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT topic FROM test_questions WHERE topic LIKE 'Экзамен_%' ORDER BY topic")
-            rows = cur.fetchall()
-            exam_topics = {row['topic'].replace('_', ' '): row['topic'] for row in rows}
-        finally:
-            conn.close()
+        exam_topics = {
+            "Экзамен 1": "Экзамен_1",
+            "Экзамен 2": "Экзамен_2",
+            "Экзамен 3": "Экзамен_3"
+        }
         if clean_text in exam_topics:
             topic = exam_topics[clean_text]
             state_data['selected_topic'] = topic
@@ -3563,26 +3596,24 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
             safe_menu_state_set(key, state_data)
             send_menu(peer_id, sender_id, f"Выберите вариант для {clean_text}:", get_exam_variants_keyboard(topic))
             return True
-        else:
-            pass
 
     if current_state == 'manage_st4_exam_variants':
         topic = state_data.get('selected_topic')
-        display_topic = topic.replace('_', ' ')
-        for v in [1, 2, 3]:
-            if clean_text == f"{display_topic} вариант {v}":
+        if clean_text.isdigit():
+            v = int(clean_text)
+            if 1 <= v <= 3:
                 state_data['selected_variant'] = v
                 state_data['state'] = 'manage_st4_exam_edit_one_by_one'
                 safe_menu_state_set(key, state_data)
                 questions = get_test_questions(topic, v, peer_id)
                 if questions:
-                    msg = f"❓ Режим по одному. Тема: {display_topic}, вариант {v}\n\nВопросов: {len(questions)}\n\n"
+                    msg = f"❓ Режим по одному. Тема: {topic.replace('_', ' ')}, вариант {v}\n\nВопросов: {len(questions)}\n\n"
                     for q in questions:
                         msg += f"{q['order_num']}. {q['question_text']}\n"
                     msg += "\nВыберите действие:"
                     send_menu(peer_id, sender_id, msg, get_manage_test_questions_keyboard())
                 else:
-                    send_menu(peer_id, sender_id, f"❓ Режим по одному. Тема: {display_topic}, вариант {v}\n\nВопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
+                    send_menu(peer_id, sender_id, f"❓ Режим по одному. Тема: {topic.replace('_', ' ')}, вариант {v}\n\nВопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
                 return True
 
     # Обработка редактирования вопросов для экзаменационных тестов (аналогично теории)
@@ -3758,6 +3789,7 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
 
     if current_state == 'manage_st4_exam_edit_question':
         if clean_text == "✏️ Редактировать вопрос":
+            state_data['from_exam'] = True            
             state_data['state'] = 'wait_edit_question_text'
             state_data['buffer'] = ""
             safe_menu_state_set(key, state_data)
@@ -3916,6 +3948,346 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
                 conn.close()
             send_message(peer_id, "✅ Вариант обновлён.")
             state_data['state'] = 'manage_st4_exam_edit_options'
+            safe_menu_state_set(key, state_data)
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+            send_menu(peer_id, sender_id, f"Текущие варианты:\n\n{options_list}\n\nВыберите действие:", get_edit_options_keyboard())
+            return True
+        # ===== Управление вопросами для 2 этапа (теория) =====
+    if current_state == 'manage_edit_one_by_one':
+        topic = state_data.get('selected_topic')
+        variant = state_data.get('selected_variant')
+        if clean_text == "➕ Добавить вопрос":
+            state_data['state'] = 'manage_add_question'
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "📝 Введите текст вопроса:", get_buffer_keyboard())
+            return True
+        elif clean_text == "✏️ Редактировать вопрос":
+            questions = get_test_questions(topic, variant, peer_id)
+            if not questions:
+                send_message(peer_id, "❌ Нет вопросов для редактирования.")
+                return True
+            state_data['state'] = 'manage_select_question_to_edit'
+            safe_menu_state_set(key, state_data)
+            kb = get_question_list_keyboard(questions)
+            send_menu(peer_id, sender_id, "Выберите номер вопроса для редактирования:", kb)
+            return True
+        elif clean_text == "🗑 Удалить вопрос":
+            questions = get_test_questions(topic, variant, peer_id)
+            if not questions:
+                send_message(peer_id, "❌ Нет вопросов для удаления.")
+                return True
+            state_data['state'] = 'manage_select_question_to_delete'
+            safe_menu_state_set(key, state_data)
+            kb = get_question_list_keyboard(questions)
+            send_menu(peer_id, sender_id, "Выберите номер вопроса для удаления:", kb)
+            return True
+        elif clean_text == "🗑 Удалить все вопросы":
+            delete_test_questions(peer_id, topic, variant)
+            send_message(peer_id, "✅ Все вопросы удалены.")
+            state_data['state'] = 'manage_edit_one_by_one'
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, f"❓ Режим по одному. Вопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
+            return True
+
+    if current_state == 'manage_add_question':
+        if clean_text == "💾 Сохранить":
+            question_text = state_data.get('buffer', '').strip()
+            if not question_text:
+                send_message(peer_id, "❌ Вопрос не может быть пустым.")
+                return True
+            state_data['question_text'] = question_text
+            state_data['state'] = 'manage_enter_options_type'
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Введите варианты ответов.\nКаждый вариант с новой строки в формате:\n<буква>. <текст>\nНапример:\nА. Вариант 1\nБ. Вариант 2\n\nПосле ввода всех вариантов нажмите «✅ Готово».", get_add_option_keyboard())
+            return True
+        else:
+            if 'buffer' not in state_data:
+                state_data['buffer'] = ""
+            if state_data['buffer']:
+                state_data['buffer'] += "\n"
+            state_data['buffer'] += clean_text
+            safe_menu_state_set(key, state_data)
+            return True
+
+    if current_state == 'manage_enter_options_type':
+        if clean_text == "✅ Готово":
+            options_text = state_data.get('buffer', '').strip()
+            if not options_text:
+                send_message(peer_id, "❌ Нужно ввести хотя бы один вариант.")
+                return True
+            lines = options_text.splitlines()
+            options = []
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                match = re.match(r'^([А-Яа-яA-Za-z])[\.\)]\s*(.+)$', line)
+                if not match:
+                    send_message(peer_id, f"❌ Неверный формат строки: {line}\nИспользуйте «А. текст» или «А) текст».")
+                    return True
+                label = match.group(1).upper()
+                text_option = match.group(2).strip()
+                options.append((label, text_option))
+            if len(options) < 2:
+                send_message(peer_id, "❌ Должно быть минимум 2 варианта.")
+                return True
+            state_data['options'] = options
+            state_data['state'] = 'manage_enter_correct'
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            options_list = "\n".join([f"{label}). {text}" for label, text in options])
+            send_menu(peer_id, sender_id, f"Введите номер (букву) правильного варианта из списка:\n\n{options_list}", get_buffer_keyboard())
+            return True
+        else:
+            if 'buffer' not in state_data:
+                state_data['buffer'] = ""
+            if state_data['buffer']:
+                state_data['buffer'] += "\n"
+            state_data['buffer'] += clean_text
+            safe_menu_state_set(key, state_data)
+            return True
+
+    if current_state == 'manage_enter_correct':
+        if clean_text == "💾 Сохранить":
+            correct_label = state_data.get('buffer', '').strip().upper()
+            options = state_data.get('options', [])
+            correct_index = None
+            for i, (label, text) in enumerate(options):
+                if label.upper() == correct_label:
+                    correct_index = i
+                    break
+            if correct_index is None:
+                send_message(peer_id, "❌ Неверная буква. Попробуйте снова.")
+                state_data['buffer'] = ""
+                safe_menu_state_set(key, state_data)
+                return True
+            topic = state_data.get('selected_topic')
+            variant = state_data.get('selected_variant')
+            question_text = state_data.get('question_text')
+            order_num = len(get_test_questions(topic, variant, peer_id)) + 1
+            add_test_question(peer_id, topic, variant, question_text, correct_index, order_num, options)
+            send_message(peer_id, "✅ Вопрос добавлен!")
+            state_data['state'] = 'manage_edit_one_by_one'
+            safe_menu_state_set(key, state_data)
+            questions = get_test_questions(topic, variant, peer_id)
+            if questions:
+                msg = f"❓ Режим по одному. Вопросов: {len(questions)}\n\n"
+                for q in questions:
+                    msg += f"{q['order_num']}. {q['question_text']}\n"
+                msg += "\nВыберите действие:"
+                send_menu(peer_id, sender_id, msg, get_manage_test_questions_keyboard())
+            else:
+                send_menu(peer_id, sender_id, "❓ Режим по одному. Вопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
+            return True
+        else:
+            state_data['buffer'] = clean_text
+            safe_menu_state_set(key, state_data)
+            return True
+
+    if current_state == 'manage_select_question_to_edit':
+        if clean_text.isdigit():
+            qnum = int(clean_text)
+            topic = state_data.get('selected_topic')
+            variant = state_data.get('selected_variant')
+            questions = get_test_questions(topic, variant, peer_id)
+            if 1 <= qnum <= len(questions):
+                q = questions[qnum-1]
+                state_data['edit_question_id'] = q['id']
+                state_data['state'] = 'manage_edit_question'
+                safe_menu_state_set(key, state_data)
+                send_menu(peer_id, sender_id, f"Редактируем вопрос {qnum}:\n\n{q['question_text']}\n\nЧто сделать?", get_edit_question_keyboard())
+            else:
+                send_message(peer_id, "❌ Неверный номер.")
+        return True
+
+    if current_state == 'manage_select_question_to_delete':
+        if clean_text.isdigit():
+            qnum = int(clean_text)
+            topic = state_data.get('selected_topic')
+            variant = state_data.get('selected_variant')
+            questions = get_test_questions(topic, variant, peer_id)
+            if 1 <= qnum <= len(questions):
+                q = questions[qnum-1]
+                delete_test_question(q['id'], peer_id)
+                send_message(peer_id, "✅ Вопрос удалён.")
+                state_data['state'] = 'manage_edit_one_by_one'
+                safe_menu_state_set(key, state_data)
+                questions = get_test_questions(topic, variant, peer_id)
+                if questions:
+                    msg = f"❓ Режим по одному. Вопросов: {len(questions)}\n\n"
+                    for q in questions:
+                        msg += f"{q['order_num']}. {q['question_text']}\n"
+                    msg += "\nВыберите действие:"
+                    send_menu(peer_id, sender_id, msg, get_manage_test_questions_keyboard())
+                else:
+                    send_menu(peer_id, sender_id, "❓ Режим по одному. Вопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
+            else:
+                send_message(peer_id, "❌ Неверный номер.")
+        return True
+
+    if current_state == 'manage_edit_question':
+        if clean_text == "✏️ Редактировать вопрос":
+            state_data['state'] = 'wait_edit_question_text'
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Введите новый текст вопроса:", get_buffer_keyboard())
+            return True
+        elif clean_text == "✏️ Редактировать варианты":
+            state_data['state'] = 'manage_edit_options'
+            safe_menu_state_set(key, state_data)
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            if not options:
+                send_message(peer_id, "❌ У вопроса нет вариантов.")
+                return True
+            options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+            send_menu(peer_id, sender_id, f"Текущие варианты:\n\n{options_list}\n\nВыберите действие:", get_edit_options_keyboard())
+            return True
+        elif clean_text == "🗑 Удалить вопрос":
+            qid = state_data.get('edit_question_id')
+            delete_test_question(qid, peer_id)
+            send_message(peer_id, "✅ Вопрос удалён.")
+            state_data['state'] = 'manage_edit_one_by_one'
+            safe_menu_state_set(key, state_data)
+            topic = state_data.get('selected_topic')
+            variant = state_data.get('selected_variant')
+            questions = get_test_questions(topic, variant, peer_id)
+            if questions:
+                msg = f"❓ Режим по одному. Вопросов: {len(questions)}\n\n"
+                for q in questions:
+                    msg += f"{q['order_num']}. {q['question_text']}\n"
+                msg += "\nВыберите действие:"
+                send_menu(peer_id, sender_id, msg, get_manage_test_questions_keyboard())
+            else:
+                send_menu(peer_id, sender_id, "❓ Режим по одному. Вопросов пока нет.\nДобавьте вопросы:", get_manage_test_questions_keyboard())
+            return True
+
+    if current_state == 'manage_edit_options':
+        if clean_text == "➕ Добавить вариант":
+            state_data['state'] = 'manage_edit_options_text'
+            state_data['buffer'] = ""
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Введите новый вариант в формате:\n<буква>. <текст>", get_buffer_keyboard())
+            return True
+        elif clean_text == "🗑 Удалить вариант":
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            if not options:
+                send_message(peer_id, "❌ Нет вариантов для удаления.")
+                return True
+            state_data['state'] = 'manage_edit_options_delete'
+            safe_menu_state_set(key, state_data)
+            options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+            send_menu(peer_id, sender_id, f"Выберите номер варианта для удаления:\n\n{options_list}\n\n(введите число)", get_buffer_keyboard(next_step=True))
+            return True
+        elif clean_text == "✏️ Изменить вариант":
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            if not options:
+                send_message(peer_id, "❌ Нет вариантов для изменения.")
+                return True
+            state_data['state'] = 'manage_edit_options_select'
+            safe_menu_state_set(key, state_data)
+            options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+            send_menu(peer_id, sender_id, f"Выберите номер варианта для изменения:\n\n{options_list}\n\n(введите число)", get_buffer_keyboard(next_step=True))
+            return True
+        elif clean_text == "✅ Готово":
+            state_data['state'] = 'manage_edit_question'
+            safe_menu_state_set(key, state_data)
+            send_menu(peer_id, sender_id, "Возврат к редактированию вопроса.", get_edit_question_keyboard())
+            return True
+
+    if current_state == 'manage_edit_options_text':
+        if clean_text == "💾 Сохранить":
+            line = state_data.get('buffer', '').strip()
+            match = re.match(r'^([А-Яа-яA-Za-z])[\.\)]\s*(.+)$', line)
+            if not match:
+                send_message(peer_id, "❌ Неверный формат. Используйте «А. текст» или «А) текст».")
+                return True
+            label = match.group(1).upper()
+            text_option = match.group(2).strip()
+            qid = state_data.get('edit_question_id')
+            conn = get_db_connection(peer_id)
+            try:
+                cur = conn.cursor()
+                cur.execute("SELECT MAX(id) FROM test_options WHERE question_id=?", (qid,))
+                max_id = cur.fetchone()[0]
+                if max_id is None:
+                    max_id = 0
+                new_order = max_id + 1
+                cur.execute("INSERT INTO test_options (question_id, option_label, option_text) VALUES (?, ?, ?)", (qid, label, text_option))
+                conn.commit()
+            finally:
+                conn.close()
+            send_message(peer_id, "✅ Вариант добавлен.")
+            state_data['state'] = 'manage_edit_options'
+            safe_menu_state_set(key, state_data)
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+            send_menu(peer_id, sender_id, f"Текущие варианты:\n\n{options_list}\n\nВыберите действие:", get_edit_options_keyboard())
+            return True
+
+    if current_state == 'manage_edit_options_delete':
+        if clean_text.isdigit():
+            idx = int(clean_text) - 1
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            if 0 <= idx < len(options):
+                opt_id = options[idx]['id']
+                conn = get_db_connection(peer_id)
+                try:
+                    conn.execute("DELETE FROM test_options WHERE id=?", (opt_id,))
+                    conn.commit()
+                finally:
+                    conn.close()
+                send_message(peer_id, "✅ Вариант удалён.")
+                state_data['state'] = 'manage_edit_options'
+                safe_menu_state_set(key, state_data)
+                options = get_test_options(qid, peer_id)
+                options_list = "\n".join([f"{i+1}. {opt['option_label']}). {opt['option_text']}" for i, opt in enumerate(options)])
+                send_menu(peer_id, sender_id, f"Текущие варианты:\n\n{options_list}\n\nВыберите действие:", get_edit_options_keyboard())
+            else:
+                send_message(peer_id, "❌ Неверный номер.")
+        return True
+
+    if current_state == 'manage_edit_options_select':
+        if clean_text.isdigit():
+            idx = int(clean_text) - 1
+            qid = state_data.get('edit_question_id')
+            options = get_test_options(qid, peer_id)
+            if 0 <= idx < len(options):
+                state_data['edit_option_id'] = options[idx]['id']
+                state_data['state'] = 'manage_edit_options_change'
+                state_data['buffer'] = ""
+                safe_menu_state_set(key, state_data)
+                send_menu(peer_id, sender_id, f"Введите новый текст для варианта {options[idx]['option_label']}:\n(формат: <буква>. <текст>)", get_buffer_keyboard())
+            else:
+                send_message(peer_id, "❌ Неверный номер.")
+        return True
+
+    if current_state == 'manage_edit_options_change':
+        if clean_text == "💾 Сохранить":
+            line = state_data.get('buffer', '').strip()
+            match = re.match(r'^([А-Яа-яA-Za-z])[\.\)]\s*(.+)$', line)
+            if not match:
+                send_message(peer_id, "❌ Неверный формат. Используйте «А. текст» или «А) текст».")
+                return True
+            label = match.group(1).upper()
+            text_option = match.group(2).strip()
+            opt_id = state_data.get('edit_option_id')
+            conn = get_db_connection(peer_id)
+            try:
+                conn.execute("UPDATE test_options SET option_label=?, option_text=? WHERE id=?", (label, text_option, opt_id))
+                conn.commit()
+            finally:
+                conn.close()
+            send_message(peer_id, "✅ Вариант обновлён.")
+            state_data['state'] = 'manage_edit_options'
             safe_menu_state_set(key, state_data)
             qid = state_data.get('edit_question_id')
             options = get_test_options(qid, peer_id)
