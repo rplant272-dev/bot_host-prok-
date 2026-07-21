@@ -3185,7 +3185,7 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
             current_txt = get_setting("st1_text", None, peer_id)
             if not current_txt:
                 current_txt = "Текст не задан."
-            send_menu(peer_id, sender_id, f"📝 ТЕКУЩИЙ ТЕКСТ ОЗНАКОМЛЕНИЯ:\n\n{current_txt}", get_manage_simple_action_keyboard())
+            send_long_message(peer_id, f"📝 ТЕКУЩИЙ ТЕКСТ ОЗНАКОМЛЕНИЯ:\n\n{current_txt}", keyboard=get_manage_simple_action_keyboard())
         elif clean_text == "📖 2 этап (теория)":
             state_data['state'] = 'manage_st2_theory'
             safe_menu_state_set(key, state_data)
@@ -3228,7 +3228,7 @@ def handle_manage_message(text, peer_id, sender_id, conversation_message_id):
         set_setting("st1_text", final_text, peer_id)
         state_data['state'] = 'manage_st1'
         safe_menu_state_set(key, state_data)
-        send_menu(peer_id, sender_id, f"✅ Текст ознакомления обновлён!\n\n{final_text if final_text else '(пусто)'}", get_manage_simple_action_keyboard())
+        send_long_message(peer_id, f"✅ Текст ознакомления обновлён!\n\n{final_text if final_text else '(пусто)'}", keyboard=get_manage_simple_action_keyboard())
         delete_message_later(peer_id, conversation_message_id)
         return True
 
